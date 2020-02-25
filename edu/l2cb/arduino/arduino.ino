@@ -10,137 +10,8 @@
 #include <stdint.h>
 #include <stddef.h>
 
-typedef int16_t bufLen;
-
-#define StartBlock()  (code_ptr = dst++, code = 1)
-#define FinishBlock() (*code_ptr = code)
-
-size_t StuffData(const uint8_t *ptr, bufLen length, uint8_t *dst) {
-  const uint8_t *start = dst, *end = ptr + length;
-  uint8_t code, *code_ptr; /* Where to insert the leading count */
-
-  StartBlock();
-  while (ptr < end) {
-    if (code != 0xFF) {
-      uint8_t c = *ptr++;
-      if (c != 0) {
-        *dst++ = c;
-        code++;
-        continue;
-      }
-    }
-    FinishBlock();
-    StartBlock();
-  }
-  FinishBlock();
-  return dst - start;
-}
-
-
-
-/*
- * UnStuffData decodes "length" bytes of data at
- * the location pointed to by "ptr", writing the
- * output to the location pointed to by "dst".
- *
- * Returns the length of the decoded data
- * (which is guaranteed to be <= length).
- */
- 
-bufLen UnStuffData(const uint8_t *ptri, bufLen length, uint8_t *dst, bufLen *zeroAt) {
-  const uint8_t *start = dst, *ptr = ptri, *end = ptr + length;
-  uint8_t code = 0xFF, copy = 0;
-
-  *zeroAt = -1;
-  
-  for (; ptr < end; copy--) {
-    if (copy != 0) {
-      *dst++ = *ptr++;
-    } else {
-      if (code != 0xFF)
-        *dst++ = 0;
-      copy = code = *ptr++;
-      if (code == 0) {
-        *zeroAt = ptr - ptri;
-        break; /* Source length too long */
-      }
-    }
-  }
-  return dst - start;
-}
-
-#define MAX_UINT8_BUF_SIZE (256)
-
-class CobsDecoderCallback {
-
-  public:
-
-    virtual void onPacket(uint8_t *pBuf, bufLen len) = 0;
-    
-};
-
-class CobsDecoder {
-
-  public:
-
-    typedef struct _tBuf {
-      uint8_t buf[MAX_UINT8_BUF_SIZE];
-      uint8_t len;
-    } tBuf;
-
-  private:
-
-    tBuf input, output;
-    CobsDecoderCallback *callback;
-
-    void initBuf(tBuf &buf) {
-      buf.len = 0;
-      //memset(buf.buf, 0, sizeof(buf.buf));    
-    }
-
-  public:
-
-    CobsDecoder(CobsDecoderCallback *pCallback) {
-      initBuf(input);
-      callback = pCallback;
-    }
-
-    bool append(uint8_t *pBuf, uint8_t len) {
-      if (input.len + len > MAX_UINT8_BUF_SIZE) {
-        return false;
-      }
-      memcpy(input.buf + input.len, pBuf, len);
-      input.len += len;
-      return true;
-    }
-
-    bool feed() {
-      bufLen zeroAt;
-
-      initBuf(output);
-      bufLen len = UnStuffData(input.buf, input.len, output.buf, &zeroAt);
-      if (-1 != zeroAt) {
-        /*
-         * Feed this packet.
-         */
-        callback->onPacket(output.buf, len);
-        bufLen nextByte = zeroAt + 1;
-        bufLen newLen = input.len - nextByte;
-        memmove(input.buf, input.buf + nextByte, newLen);
-        input.len = newLen;
-        return true;
-      }
-      if (len >= MAX_UINT8_BUF_SIZE) {
-        /*
-         * Too big of a packet. Discard.
-         */
-        initBuf(input);
-      }
-      return false;
-    }
-
-};
-
+typedef int16_t tBufLen;
+typedef uint8_t tBufByte;
 
 /*
 
@@ -344,36 +215,16 @@ void checkForSysCmds() {
   }
 }
 
-#define MAX_LED 6
 
-class LedManager {
 
-  private:
 
-    uint8_t getHwPin(uint8_t pin) {
-      return pin + 8;
-    }
 
-  public:
-
-    
-    LedManager() {
-      for (int i = 0; i < MAX_LED; i += 1) {
-        uint8_t pin = getHwPin(i);
-        pinMode(pin, OUTPUT);
-        digitalWrite(pin, LOW);
-      }
-    }
-};
-
-//#define MAX_UINT8_BUF_SIZE (256)
-
-class MsgBuf {
+template<tBufLen X> class MsgBuf {
 
   private:
 
-    uint8_t buf[MAX_UINT8_BUF_SIZE];
-    int16_t len;
+    tBufByte buf[X];
+    tBufLen  len;
     
   public:
 
@@ -385,53 +236,301 @@ class MsgBuf {
       this->len = 0;
     }
 
-    void appendByte(uint8_t c) {
+    void appendByte(tBufByte c) {
       this->buf[this->len++] = c;
     }
 
-    bool hasSpace() {
-      return this->len < MAX_UINT8_BUF_SIZE;
+    tBufByte *getBufPtr() {
+      return this->buf;
     }
+
+    bool hasSpace() {
+      return this->len < X;
+    }
+
+    int16_t getLen() {
+      return this->len;
+    }
+
+    uint8_t byteAt(tBufLen index) {
+      return this->buf[index];
+    }
+
+    void splice(tBufLen to, tBufLen from, tBufLen len) {
+      if (len < 0) {
+        len = this->len - from;
+      }
+      memmove(buf + to, buf + from, len);
+      this->len = to + len;
+    }
+
     
 };
 
-class SerialManager {
+#define MAX_UINT8_BUF_SIZE (256)
 
-  private:
+typedef MsgBuf<MAX_UINT8_BUF_SIZE> MsgBufBig;
+typedef MsgBuf<32> MsgBufResp;
 
-    MsgBuf msgBuf;
+class CobsDecoderCallback {
 
   public:
 
-    SerialManager() {
-      Serial.begin(115200);
+    virtual void onPacket(MsgBufBig *pData) = 0;
+    
+};
+
+class CobsDecoder {
+
+  private:
+
+    MsgBufBig *input, output;
+    CobsDecoderCallback *callback;
+
+  public:
+
+    CobsDecoder(MsgBufBig *pInput, CobsDecoderCallback *pCallback) {
+      this->callback = pCallback;
+      this->input = pInput;
     }
 
-    void WaitForReady() {
+    /*
+     * UnStuffData decodes "length" bytes of data at
+     * the location pointed to by "ptr", writing the
+     * output to the location pointed to by "dst".
+     *
+     * Returns the length of the decoded data
+     * (which is guaranteed to be <= length).
+     */
+     
+    tBufLen UnStuffData(tBufLen start, tBufLen len, tBufLen *zeroAt) {
+      tBufByte code = 0xFF, copy = 0;
+      tBufLen end = start + len;
+      
+      *zeroAt = -1;
+      
+      for (tBufLen curr = start; curr < end; copy--) {
+        if (copy != 0) {
+          this->output.appendByte(this->input->byteAt(curr++));
+        } else {
+          if (code != 0xFF) {
+            this->output.appendByte(0);
+          }
+          copy = code = this->input->byteAt(curr++);
+          if (code == 0) {
+            *zeroAt = curr;
+            break; /* Source length too long */
+          }
+        }
+      }
+      return output.getLen();
+    }
+    
+
+    bool feed() {
+      tBufLen zeroAt;
+
+      output.reset();
+     
+      tBufLen len = this->UnStuffData(0, this->input->getLen(), &zeroAt);
+      if (-1 != zeroAt) {
+        /*
+         * Feed this packet.
+         */
+        callback->onPacket(&output);
+        this->input->splice(0, zeroAt + 1, -1);
+        return true;
+      }
+      if (len >= MAX_UINT8_BUF_SIZE) {
+        /*
+         * Too big of a packet. Discard.
+         */
+        this->input->reset();
+      }
+      return false;
+    }
+
+};
+
+#define MAX_LED 6
+
+class LedMgr {
+
+  private:
+
+    uint8_t getHwPin(uint8_t pin) {
+      return pin + 8;
+    }
+
+  public:
+
+    
+    LedMgr() {
+      for (int i = 0; i < MAX_LED; i += 1) {
+        uint8_t pin = getHwPin(i);
+        pinMode(pin, OUTPUT);
+        digitalWrite(pin, LOW);
+      }
+    }
+
+    void allTo(const uint8_t state) {
+      for (int i = 0; i < MAX_LED; i += 1) {
+        uint8_t pin = getHwPin(i);
+        digitalWrite(pin, state);
+      }
+    }
+
+    uint8_t getNumLights() {
+      return MAX_LED;
+    }
+
+};
+
+class SerialMgr {
+
+  private:
+
+    MsgBufBig *input;
+
+  public:
+
+    SerialMgr(MsgBufBig *pInput) {
+      this->input = pInput;
+    }
+
+    void waitForReady() {
+      Serial.begin(115200);      
       while (!Serial) {
         delay(100);
       }
     }
 
-    void fromSerial() {
-      while (Serial.available() && msgBuf.hasSpace()) {
-        msgBuf.appendByte(Serial.read());
+    tBufLen fromSerial() {
+      while (Serial.available() && this->input->hasSpace()) {
+        this->input->appendByte(Serial.read());
       }
+      return this->input->getLen();
     }
-  
+
+
+    void send(uint8_t *pBuf, uint16_t offset, uint16_t len) {
+      uint16_t endOffset = offset + len;
+      for (uint16_t i = offset; i < endOffset; i += 1) {
+        Serial.write(pBuf[i]);
+      }
+      Serial.write('\n');
+    }
 };
 
-SerialManager serialMgr;
-LedManager ledMgr;
+#define StartBlock()  (code_ptr = dst++, code = 1)
+#define FinishBlock() (*code_ptr = code)
+
+class CobsEncoder {
+
+  private:
+
+    
+    tBufLen StuffData(const tBufByte *ptr, tBufLen length, tBufByte *dst) {
+      const tBufByte *start = dst, *end = ptr + length;
+      tBufByte code, *code_ptr; /* Where to insert the leading count */
+
+      StartBlock();
+      while (ptr < end) {
+        if (code != 0xFF) {
+          tBufByte c = *ptr++;
+          if (c != 0) {
+            *dst++ = c;
+            code++;
+            continue;
+          }
+        }
+        FinishBlock();
+        StartBlock();
+      }
+      FinishBlock();
+      return dst - start;
+    }
+
+    SerialMgr *serialMgr;
+    
+  public:
+
+    CobsEncoder(SerialMgr *pSerialMgr) {
+      this->serialMgr = pSerialMgr;
+    }
+
+    void send(MsgBufResp *pResp) {
+      
+    }
+
+};
+
+#define PROTOCOL_VERSION (1)
+
+class CmdProcessor : public CobsDecoderCallback {
+
+  private:
+
+    typedef enum _tCmds {
+      Program = 80,
+      Query
+    } tCmds;
+    
+    SerialMgr *serialMgr;
+    LedMgr *ledMgr;
+    MsgBufResp respBuf;
+    
+    
+  public:
+
+    CmdProcessor(SerialMgr *pSerialMgr, LedMgr *pLedMgr) {
+      this->serialMgr = pSerialMgr;
+      this->ledMgr = pLedMgr;
+    }
+
+    void onPacket(MsgBufBig *pData) {
+      if (pData->getLen() < 1) {
+        return;
+      }
+      respBuf.reset();
+      tBufByte cmd = pData->byteAt(0);
+      switch (cmd) {
+        case tCmds::Query:
+          respBuf.appendByte(tCmds::Query);
+          respBuf.appendByte(pData->byteAt(1)); /* Req <-> Resp match */
+          respBuf.appendByte(PROTOCOL_VERSION);
+          respBuf.appendByte(this->ledMgr->getNumLights());
+          break;
+      }
+    }
+
+};
+
+MsgBufBig input;
+LedMgr ledMgr;
+
+SerialMgr serialMgr(&input);
+CobsEncoder cobsEncoder(&serialMgr);
+CmdProcessor cmdProcessor(&serialMgr, &ledMgr);
+CobsDecoder cobsDecoder(&input, &cmdProcessor);
+
 
 /*
  * n = Turn On
  * o = Turn Off
  * w = Wait
  */
-void loop() {
 
+uint8_t state = LOW;
+   
+void loop() {
+  if (serialMgr.fromSerial() > 0) {
+    cobsDecoder.feed();
+  }
+  ledMgr.allTo(state);
+  state = (LOW == state) ? HIGH : LOW;
   delay(1000);
+  
   /*
   checkForSysCmds();
   if (gProgramLen < 1) {
@@ -467,7 +566,7 @@ void loop() {
 
 void setup() {
 
-  serialMgr.WaitForReady();
+  serialMgr.waitForReady();
   /*
   gSerialLen = 0;
   gMaxProgramLen = min(MAX_PROG_BUF_SIZE, EEPROM.length() - 8);
