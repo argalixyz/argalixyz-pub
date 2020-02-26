@@ -248,12 +248,16 @@ template<tBufLen X> class MsgBuf {
       return this->len < X;
     }
 
-    int16_t getLen() {
+    tBufLen getLen() {
       return this->len;
     }
 
-    uint8_t byteAt(tBufLen index) {
+    tBufByte getByteAt(tBufLen index) {
       return this->buf[index];
+    }
+
+    void setByteAt(tBufLen index, tBufByte ch) {
+      this->buf[index] = ch;
     }
 
     void splice(tBufLen to, tBufLen from, tBufLen len) {
@@ -311,12 +315,12 @@ class CobsDecoder {
       
       for (tBufLen curr = start; curr < end; copy--) {
         if (copy != 0) {
-          this->output.appendByte(this->input->byteAt(curr++));
+          this->output.appendByte(this->input->getByteAt(curr++));
         } else {
           if (code != 0xFF) {
             this->output.appendByte(0);
           }
-          copy = code = this->input->byteAt(curr++);
+          copy = code = this->input->getByteAt(curr++);
           if (code == 0) {
             *zeroAt = curr;
             break; /* Source length too long */
@@ -380,6 +384,11 @@ class LedMgr {
       }
     }
 
+    void pinTo(uint8_t pin, const uint8_t state) {
+      uint8_t hwPin = getHwPin(pin);
+      digitalWrite(hwPin, state);
+    }
+
     uint8_t getNumLights() {
       return MAX_LED;
     }
@@ -412,55 +421,66 @@ class SerialMgr {
       return this->input->getLen();
     }
 
-
-    void send(uint8_t *pBuf, uint16_t offset, uint16_t len) {
-      uint16_t endOffset = offset + len;
-      for (uint16_t i = offset; i < endOffset; i += 1) {
-        Serial.write(pBuf[i]);
+    void send(MsgBufResp *pOutput) {
+      tBufLen len = pOutput->getLen();
+      for (tBufLen i = 0; i < len; i += 1) {
+        Serial.write(pOutput->getByteAt(i));
       }
-      Serial.write('\n');
     }
 };
-
-#define StartBlock()  (code_ptr = dst++, code = 1)
-#define FinishBlock() (*code_ptr = code)
 
 class CobsEncoder {
 
   private:
 
-    
-    tBufLen StuffData(const tBufByte *ptr, tBufLen length, tBufByte *dst) {
-      const tBufByte *start = dst, *end = ptr + length;
-      tBufByte code, *code_ptr; /* Where to insert the leading count */
+    SerialMgr  *serialMgr;
+    MsgBufResp  tempBuf, respBuf;
 
-      StartBlock();
+    inline void StartBlock(tBufLen *code_ptr, tBufByte *code) {
+      *code_ptr = this->tempBuf.getLen();
+      this->tempBuf.appendByte(0);
+      *code = 1;
+    }
+
+    inline void FinishBlock(tBufLen code_ptr, tBufByte code) {
+      this->tempBuf.setByteAt(code_ptr, code);
+    }
+    
+    void StuffData() {
+      tBufByte code;
+      tBufLen  code_ptr, ptr = 0, end = this->respBuf.getLen();
+      tBufLen  dst = 0;
+
+      tempBuf.reset();
+      StartBlock(&code_ptr, &code);
       while (ptr < end) {
         if (code != 0xFF) {
-          tBufByte c = *ptr++;
+          tBufByte c = this->respBuf.getByteAt(ptr++);
           if (c != 0) {
-            *dst++ = c;
+            this->tempBuf.appendByte(c);
             code++;
             continue;
           }
         }
-        FinishBlock();
-        StartBlock();
+        FinishBlock(code_ptr, code);
+        StartBlock(&code_ptr, &code);
       }
-      FinishBlock();
-      return dst - start;
+      FinishBlock(code_ptr, code);
     }
 
-    SerialMgr *serialMgr;
-    
   public:
 
     CobsEncoder(SerialMgr *pSerialMgr) {
       this->serialMgr = pSerialMgr;
     }
 
-    void send(MsgBufResp *pResp) {
-      
+    MsgBufResp *getRespBuf() {
+      return &this->respBuf;
+    }
+    
+    void send() {
+      this->StuffData();
+      this->serialMgr->send(&this->tempBuf);
     }
 
 };
@@ -478,28 +498,36 @@ class CmdProcessor : public CobsDecoderCallback {
     
     SerialMgr *serialMgr;
     LedMgr *ledMgr;
-    MsgBufResp respBuf;
-    
+    CobsEncoder *encoder;
+    MsgBufResp *respBuf;
     
   public:
 
-    CmdProcessor(SerialMgr *pSerialMgr, LedMgr *pLedMgr) {
+    CmdProcessor(SerialMgr *pSerialMgr, LedMgr *pLedMgr, CobsEncoder *pEncoder) {
       this->serialMgr = pSerialMgr;
       this->ledMgr = pLedMgr;
+      this->encoder = pEncoder;
+      this->respBuf = this->encoder->getRespBuf();
     }
 
     void onPacket(MsgBufBig *pData) {
-      if (pData->getLen() < 1) {
+      tBufLen len = pData->getLen();
+      
+      if (len < 1) {
         return;
       }
-      respBuf.reset();
-      tBufByte cmd = pData->byteAt(0);
+      
+      this->respBuf->reset();
+      tBufByte cmd = pData->getByteAt(0);
       switch (cmd) {
         case tCmds::Query:
-          respBuf.appendByte(tCmds::Query);
-          respBuf.appendByte(pData->byteAt(1)); /* Req <-> Resp match */
-          respBuf.appendByte(PROTOCOL_VERSION);
-          respBuf.appendByte(this->ledMgr->getNumLights());
+          
+          this->respBuf->appendByte(tCmds::Query);
+          this->respBuf->appendByte(pData->getByteAt(1)); /* Req <-> Resp match */
+          this->respBuf->appendByte(PROTOCOL_VERSION);
+          this->respBuf->appendByte(this->ledMgr->getNumLights());
+          this->encoder->send();
+          this->ledMgr->pinTo(len, HIGH);
           break;
       }
     }
@@ -511,7 +539,7 @@ LedMgr ledMgr;
 
 SerialMgr serialMgr(&input);
 CobsEncoder cobsEncoder(&serialMgr);
-CmdProcessor cmdProcessor(&serialMgr, &ledMgr);
+CmdProcessor cmdProcessor(&serialMgr, &ledMgr, &cobsEncoder);
 CobsDecoder cobsDecoder(&input, &cmdProcessor);
 
 
@@ -527,9 +555,7 @@ void loop() {
   if (serialMgr.fromSerial() > 0) {
     cobsDecoder.feed();
   }
-  ledMgr.allTo(state);
-  state = (LOW == state) ? HIGH : LOW;
-  delay(1000);
+  delay(100);
   
   /*
   checkForSysCmds();
