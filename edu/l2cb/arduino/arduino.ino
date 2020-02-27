@@ -1,6 +1,3 @@
-#include <EEPROM.h>
-
-
 /*
  * COBS implementation
  * 
@@ -13,9 +10,6 @@
 typedef int16_t tBufLen;
 typedef uint8_t tBufByte;
 
-/*
-
- */
 #define MAX_PROG_BUF_SIZE 255
 #define MAX_SERIAL_BUF_SIZE (MAX_PROG_BUF_SIZE + 8)
 
@@ -25,199 +19,87 @@ typedef uint8_t tBufByte;
   "N0N1N2N3N4N5W1O0O1O2O3O4O5W1" \
   "N0N1N2N3N4N5W1O0O1O2O3O4O5W1"
 
+#define PC_TEST
+
+#ifdef PC_TEST
+
 /*
- * LED does not blink because of failure to add a wait before loop
+ * Compile with "g++ -g -x c++ arduino.ino" for testing on PC
  */
 
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
 
-  
-const uint8_t gEEPROMSig[] = {'E', 'C', '7', 0};
-uint8_t gMsg[16] = {0};
-uint8_t gProgram[MAX_PROG_BUF_SIZE];
-uint8_t gSerialBuf[MAX_SERIAL_BUF_SIZE];
-uint16_t gMaxProgramLen, gProgramLen, gSerialLen;
+#define OUTPUT (0)
+#define INPUT  (1)
+#define LOW    (0)
+#define HIGH   (1)
 
-uint8_t getHwPin(uint8_t pin) {
-  return pin + 8;
+typedef struct _PinInfo {
+  uint8_t mode;
+  uint8_t state;
+} PinInfo;
+
+PinInfo Pins[13];
+
+void pinMode(uint8_t pin, uint8_t mode) {
+  Pins[pin].mode = mode;
 }
 
-uint8_t getHwPin2(uint8_t pin) {
-  return getHwPin(pin - '0');
+void digitalWrite(uint8_t pin, uint8_t state) {
+  Pins[pin].state = state;
 }
 
-uint16_t writeEEPROMSig() {
-  uint16_t i;
-  
-  for (i = 0; gEEPROMSig[i]; i += 1) {
-    EEPROM.write(i, gEEPROMSig[i]);
-  }
-  return (i + 1);
+void delay(uint32_t d) {
+  fprintf(stdout, "Delay %d\n", d);
+  usleep(d * 1000);
 }
 
-bool saveProgram(void) {
-  uint8_t offset = writeEEPROMSig();
-  for (int i = 0; i < gMaxProgramLen; i += 1) {
-    EEPROM.write(i + offset, (i < gProgramLen) ? gProgram[i] : 0);
-  }
-  gMsg[0] = 'D';
-  return true;
-}
+class SerialCls {
 
-#define MAX_LED 6
-bool setProgramA(const uint8_t *aProgram, uint16_t offset, uint16_t len, bool save) {
-  if (len >= gMaxProgramLen) {
-    return false;
-  }
-  memcpy(gProgram, aProgram + offset, len);
-  gProgramLen = len;
-  for (int i = 0; i < MAX_LED; i += 1) {
-    digitalWrite(getHwPin(i), LOW);
-  }  
-  if (save) {
-    return saveProgram();
-  }
-  return true;
-}
+  private:
 
-bool loadProgram(void) {
-  uint16_t offset;
-  gMsg[0] = 'A';
-  for (offset = 0; gEEPROMSig[offset]; offset += 1) {
-    if (EEPROM.read(offset) != gEEPROMSig[offset]) {
-      gMsg[0] = 'B';
-      return false;
+    uint8_t  index, aLen;
+    uint8_t *pStr;
+    
+  public:
+
+    void set(uint8_t *str, uint8_t al) {
+      index = 0;
+      pStr = str;
+      aLen = al;
     }
-  }
-  uint16_t offset2;
-  for (offset2 = 0; offset2 < gMaxProgramLen; offset2 += 1) {
-    gProgram[offset2] = EEPROM.read(offset + offset2);
-    if (!gProgram[offset2]) {
-      break;
+
+    explicit operator bool() const {
+        return true;
+    }  
+
+    bool available() {
+      return index < aLen;
     }
-  }
-  gProgramLen = offset2;
-  gMsg[0] = 'C';
-  return true;
-}
 
-
-
-void execInstruction(uint8_t instruction, uint8_t param) {
-  char msg[16] = {0};
-  switch (instruction) {
-    case 'n': 
-    case 'N': {
-      
-        uint16_t pin = getHwPin2(param);
-        digitalWrite(pin, HIGH);
-        sprintf(msg, "N %d", pin);
+    uint8_t read() {
+      uint8_t result = -1;
+      if (available()) {
+        result = pStr[index++];
       }
-      break;
-      
-    case 'o':
-    case 'O': {
-        uint16_t pin = getHwPin2(param);
-        digitalWrite(pin, LOW);
-        sprintf(msg, "O %d", pin);
-      }
-      break;
-      
-    case 'w': 
-    case 'W': {
-        uint16_t d = (param - '0') * 1000;
-        delay(d);
-        sprintf(msg, "W %d", d);
-      }
-      break;
-  }
-  if (msg[0]) {
-    sendSerialMsg(msg);
-  }
-}
-
-void sendSerialMsg(const char *msg) {
-  for (uint16_t i = 0; msg[i]; i += 1) {
-    Serial.write(msg[i]);
-  }
-  Serial.write('\n');
-}
-
-void sendSerialMsg2(uint8_t *buf, uint16_t offset, uint16_t len) {
-  uint16_t endOffset = offset + len;
-  for (uint16_t i = offset; i < endOffset; i += 1) {
-    Serial.write(buf[i]);
-  }
-  Serial.write('\n');
-}
-
-bool sendId() {
-  char temp[16];
-  sprintf(temp, "%s,1,%u", gEEPROMSig, gMaxProgramLen);
-  sendSerialMsg(temp);
-  return 1;
-}
-
-
-bool handleNewProgram(uint16_t offset) {
-  uint16_t lenOffset = offset + 1;
-  if (lenOffset >= gSerialLen) {
-    return 0;
-  }
-  //uint16_t programLen = gSerialBuf[lenOffset];
-  uint16_t programLen = gSerialBuf[lenOffset] - '0';
-  uint16_t programEndOffset = programLen + lenOffset;
-  if (programEndOffset >= gSerialLen) {
-    return 0;
-  }
-  if (!setProgramA(gSerialBuf, lenOffset + 1, programLen, true)) {
-    return 0;
-  }
-  char temp[16];
-  sprintf(temp, "POK %d", programLen);
-  sendSerialMsg(temp);
-  return programEndOffset + 1;
-}
-
-void flushSysCmds() {
-  uint16_t consumed = 0;
-  
-  while (gSerialLen > 0) {
-    switch (gSerialBuf[0]) {
-      case 'P':
-        consumed = handleNewProgram(0);
-        break;
-      default:
-        consumed = 1;
-        break;
+      fprintf(stdout, "Returning %x\n", result);
+      return result;
     }
-    if (consumed < 1) {
-      break;
+
+    void begin(uint32_t baudRate) {
+      fprintf(stdout, "Baud rate set to %d\n", baudRate);
     }
-    uint16_t newLen = gSerialLen - consumed;
-    if (newLen > 0) {
-      memmove(gSerialBuf, gSerialBuf + consumed, newLen);
+
+    void write(uint8_t data) {
+      fprintf(stdout, "data %d\n", data);
     }
-    gSerialLen = newLen;
-  }
-}
+};
 
-void checkForSysCmds() {
-  char temp[32];
-  sprintf(temp, "I,ec7,1.0,%s", gMsg);
-  sendSerialMsg(temp);
-  
-  while (Serial.available() && gSerialLen < MAX_SERIAL_BUF_SIZE) {
-    gSerialBuf[gSerialLen] = Serial.read();
-    gSerialLen += 1;
-  }
-  if (gSerialLen > 0) {
-    flushSysCmds();
-  }
-}
+SerialCls Serial;
 
-
-
-
+#endif
 
 template<tBufLen X> class MsgBuf {
 
@@ -261,9 +143,16 @@ template<tBufLen X> class MsgBuf {
     }
 
     void splice(tBufLen to, tBufLen from, tBufLen len) {
+      if (from >= this->len) {
+        this->len = to;
+        return;
+      }
       if (len < 0) {
         len = this->len - from;
       }
+#ifdef PC_TEST
+      fprintf(stdout, "Memmove to: %d from: %d len: %d this.len %d\n", to, from, len, this->len);
+#endif
       memmove(buf + to, buf + from, len);
       this->len = to + len;
     }
@@ -395,6 +284,7 @@ class LedMgr {
 
 };
 
+
 class SerialMgr {
 
   private:
@@ -510,7 +400,7 @@ class CmdProcessor : public CobsDecoderCallback {
       this->respBuf = this->encoder->getRespBuf();
     }
 
-    void onPacket(MsgBufBig *pData) {
+    virtual void onPacket(MsgBufBig *pData) override {
       tBufLen len = pData->getLen();
       
       if (len < 1) {
@@ -602,3 +492,15 @@ void setup() {
   }
   */
 }
+
+
+#ifdef PC_TEST
+int main(int argc, const char *argv[]) {
+  uint8_t data[] = {3, 80, 1, 0, 3, 80, 1, 0};
+  setup();
+  Serial.set(data, sizeof(data));
+  while (true) {
+    loop();
+  }
+}
+#endif
