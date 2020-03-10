@@ -31,6 +31,7 @@ void pinMode(uint8_t pin, uint8_t mode) {
     fprintf(stdout, "PIN mode overflow pin: %d mode: %d\n", pin, mode);
   } else {
     Pins[pin].mode = mode;
+    fprintf(stdout, "PIN %d mode set to %d\n", pin, mode); 
   }
 }
 
@@ -39,6 +40,7 @@ void digitalWrite(uint8_t pin, uint8_t state) {
     fprintf(stdout, "digitalWrite overflow pin: %d state: %d\n", pin, state);
   } else {
     Pins[pin].state = state;
+    fprintf(stdout, "PIN value %d set to %d\n", pin, state);
   }
 }
 

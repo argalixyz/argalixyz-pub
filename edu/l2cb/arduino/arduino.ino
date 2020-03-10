@@ -156,8 +156,6 @@ class CobsDecoder {
          * Feed this packet.
          */
         callback->onPacket(&output);
-        this->input->reset();
-        return true; 
         
         if (-1 != zeroAt) {
           this->input->splice(0, zeroAt, -1);
@@ -286,7 +284,7 @@ class ProgramMgr {
       uint16_t d = 0;
       tBufByte instruction = this->program.getByteAt(this->ip);
       tBufByte arg = this->program.getByteAt(this->ip + 1);
-      uint8_t numLights = this->program.getLen();
+      uint8_t numLights = this->ledMgr->getNumLights();
       tBufByte index = 0;
       switch (instruction) {
         case 78: /* N = ON */ {
@@ -430,6 +428,9 @@ class CmdProcessor : public CobsDecoderCallback {
 
         case tCmds::Program:
           this->progMgr->loadProgramFrom(pData);
+          this->respBuf->appendByte(tCmds::Program);
+          this->respBuf->appendByte(pData->getByteAt(1));
+          this->encoder->send();
           break;
       }
     }
@@ -455,15 +456,13 @@ uint16_t count = 0;
 void loop() {
   tBufLen fs = serialMgr.fromSerial();
   if (fs > 0) {
-    if (cobsDecoder.feed()) {
-      ledMgr.pinTo(fs, HIGH);
-    }
+    cobsDecoder.feed();
   }
   uint16_t d = progMgr.advance();
-  if (d > 1) {
-    delay(d);
+  if (d < 10) {
+    d = 10;
   }
-    
+  delay(d);
 }
 
 void setup() {
@@ -473,17 +472,12 @@ void setup() {
 
 #ifdef PC_DEBUG
 int main(int argc, const char *argv[]) {
-  uint8_t data[] = {3, 81, 1};
+  //uint8_t data[] = {3, 81, 1};
+  uint8_t data[] = {11, 80, 1, 78, 48, 87, 49, 79, 48, 87, 49};
   //uint8_t data[] = {03, 11, 22, 02, 33, 00};
   setup();
   Serial.set(data, sizeof(data));
-  uint32_t count = 0;
   while (true) {
-    count += 1;
-    if (count > 9999999) {
-      fprintf(stdout, "%d\n", count);
-      count = 0;
-    }
     loop();
   }
 }
