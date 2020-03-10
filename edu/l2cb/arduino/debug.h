@@ -95,6 +95,6 @@ class SerialCls {
 
 SerialCls Serial;
 
-//g++ -g -Wall -Wpedantic -fsanitize=address -O0 -DPC_DEBUG -x c++ arduino.ino
+//g++ -g -Wall -Wpedantic -fstack-protector -fsanitize=address -O0 -DPC_DEBUG -x c++ arduino.ino
 
 #endif
