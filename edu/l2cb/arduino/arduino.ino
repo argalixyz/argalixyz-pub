@@ -19,87 +19,7 @@ typedef uint8_t tBufByte;
   "N0N1N2N3N4N5W1O0O1O2O3O4O5W1" \
   "N0N1N2N3N4N5W1O0O1O2O3O4O5W1"
 
-#define PC_TEST
-
-#ifdef PC_TEST
-
-/*
- * Compile with "g++ -g -x c++ arduino.ino" for testing on PC
- */
-
-#include <stdio.h>
-#include <string.h>
-#include <unistd.h>
-
-#define OUTPUT (0)
-#define INPUT  (1)
-#define LOW    (0)
-#define HIGH   (1)
-
-typedef struct _PinInfo {
-  uint8_t mode;
-  uint8_t state;
-} PinInfo;
-
-PinInfo Pins[13];
-
-void pinMode(uint8_t pin, uint8_t mode) {
-  Pins[pin].mode = mode;
-}
-
-void digitalWrite(uint8_t pin, uint8_t state) {
-  Pins[pin].state = state;
-}
-
-void delay(uint32_t d) {
-  fprintf(stdout, "Delay %d\n", d);
-  usleep(d * 1000);
-}
-
-class SerialCls {
-
-  private:
-
-    uint8_t  index, aLen;
-    uint8_t *pStr;
-    
-  public:
-
-    void set(uint8_t *str, uint8_t al) {
-      index = 0;
-      pStr = str;
-      aLen = al;
-    }
-
-    explicit operator bool() const {
-        return true;
-    }  
-
-    bool available() {
-      return index < aLen;
-    }
-
-    uint8_t read() {
-      uint8_t result = -1;
-      if (available()) {
-        result = pStr[index++];
-      }
-      fprintf(stdout, "Returning %x\n", result);
-      return result;
-    }
-
-    void begin(uint32_t baudRate) {
-      fprintf(stdout, "Baud rate set to %d\n", baudRate);
-    }
-
-    void write(uint8_t data) {
-      fprintf(stdout, "data %d\n", data);
-    }
-};
-
-SerialCls Serial;
-
-#endif
+#include "debug.h"
 
 template<tBufLen X> class MsgBuf {
 
@@ -150,14 +70,19 @@ template<tBufLen X> class MsgBuf {
       if (len < 0) {
         len = this->len - from;
       }
-#ifdef PC_TEST
-      fprintf(stdout, "Memmove to: %d from: %d len: %d this.len %d\n", to, from, len, this->len);
-#endif
       memmove(buf + to, buf + from, len);
       this->len = to + len;
+#ifdef PC_DEBUG
+      fprintf(stdout, "Memmove to: %d from: %d len: %d this.len %d\n", to, from, len, this->len);
+#endif
+      
     }
 
-    
+    void copyFrom(MsgBuf *other, tBufLen offset, tBufLen len) {
+      memcpy(this->buf, other->buf + offset, len);
+      this->len = len;
+    }
+
 };
 
 #define MAX_UINT8_BUF_SIZE (256)
@@ -226,12 +151,19 @@ class CobsDecoder {
       output.reset();
      
       tBufLen len = this->UnStuffData(0, this->input->getLen(), &zeroAt);
-      if (-1 != zeroAt) {
+      if (-1 != zeroAt || len < MAX_UINT8_BUF_SIZE) {
         /*
          * Feed this packet.
          */
         callback->onPacket(&output);
-        this->input->splice(0, zeroAt + 1, -1);
+        this->input->reset();
+        return true; 
+        
+        if (-1 != zeroAt) {
+          this->input->splice(0, zeroAt, -1);
+        } else {
+          this->input->reset();
+        }
         return true;
       }
       if (len >= MAX_UINT8_BUF_SIZE) {
@@ -316,6 +248,74 @@ class SerialMgr {
       for (tBufLen i = 0; i < len; i += 1) {
         Serial.write(pOutput->getByteAt(i));
       }
+      Serial.flush();
+    }
+};
+
+class ProgramMgr {
+
+  private:
+
+    MsgBufBig program;
+    tBufLen ip;
+    LedMgr *ledMgr;
+
+    void resetIP(void) {
+      this->ip = 0;
+    }
+    
+  public:
+
+    ProgramMgr(LedMgr *pLedMgr) {
+      this->ledMgr = pLedMgr;
+      this->resetIP();
+      this->program.reset();
+    }
+
+    
+    void loadProgramFrom(MsgBufBig *other) {
+      this->program.copyFrom(other, 2, other->getLen() - 2);
+      this->resetIP();
+    }
+
+    uint16_t advance() {
+      tBufLen len = this->program.getLen();
+      if (len < 1 || 0 != (len % 2)) {
+        return 0;
+      }
+      uint16_t d = 0;
+      tBufByte instruction = this->program.getByteAt(this->ip);
+      tBufByte arg = this->program.getByteAt(this->ip + 1);
+      uint8_t numLights = this->program.getLen();
+      tBufByte index = 0;
+      switch (instruction) {
+        case 78: /* N = ON */ {
+          index = arg - 48; /* "9" - "0" */
+          if (index >= 0 && index < numLights) {
+            this->ledMgr->pinTo(index, HIGH); 
+          }
+        }
+        break;
+      case 79: /* O = OFF */ {
+          index = arg - 48; /* "9" - "0" */
+          if (index >= 0 && index < numLights) {
+            this->ledMgr->pinTo(index, LOW);
+          }
+        }
+        break;
+      case 87: /* W = WAIT */ {
+          uint8_t interval = arg - 48;
+          if (interval >= 0 && index < 10) {
+            d = (interval * 1000);
+          }
+        }
+        break;
+      }
+      this->ip += 2;
+      if (this->ip >= len) {
+        this->ip = 0;
+      }
+      return d;
     }
 };
 
@@ -339,7 +339,6 @@ class CobsEncoder {
     void StuffData() {
       tBufByte code;
       tBufLen  code_ptr, ptr = 0, end = this->respBuf.getLen();
-      tBufLen  dst = 0;
 
       tempBuf.reset();
       StartBlock(&code_ptr, &code);
@@ -388,12 +387,14 @@ class CmdProcessor : public CobsDecoderCallback {
     
     SerialMgr *serialMgr;
     LedMgr *ledMgr;
+    ProgramMgr *progMgr;
     CobsEncoder *encoder;
     MsgBufResp *respBuf;
     
   public:
 
-    CmdProcessor(SerialMgr *pSerialMgr, LedMgr *pLedMgr, CobsEncoder *pEncoder) {
+    CmdProcessor(SerialMgr *pSerialMgr, LedMgr *pLedMgr, ProgramMgr *pProgMgr, CobsEncoder *pEncoder) {
+      this->progMgr = pProgMgr;
       this->serialMgr = pSerialMgr;
       this->ledMgr = pLedMgr;
       this->encoder = pEncoder;
@@ -402,6 +403,12 @@ class CmdProcessor : public CobsDecoderCallback {
 
     virtual void onPacket(MsgBufBig *pData) override {
       tBufLen len = pData->getLen();
+#ifdef PC_DEBUG
+      fprintf(stdout, "Buf len %d\n", len);
+      for (tBufLen i = 0; i < len; i += 1) {
+        fprintf(stdout, "Index %d data %d\n", i, pData->getByteAt(i));
+      }
+#endif          
       
       if (len < 1) {
         return;
@@ -411,95 +418,72 @@ class CmdProcessor : public CobsDecoderCallback {
       tBufByte cmd = pData->getByteAt(0);
       switch (cmd) {
         case tCmds::Query:
-          
+#ifdef PC_DEBUG
+          fprintf(stdout, "Query\n");
+#endif          
           this->respBuf->appendByte(tCmds::Query);
           this->respBuf->appendByte(pData->getByteAt(1)); /* Req <-> Resp match */
           this->respBuf->appendByte(PROTOCOL_VERSION);
           this->respBuf->appendByte(this->ledMgr->getNumLights());
           this->encoder->send();
-          this->ledMgr->pinTo(len, HIGH);
+          break;
+
+        case tCmds::Program:
+          this->progMgr->loadProgramFrom(pData);
           break;
       }
     }
 
 };
 
-MsgBufBig input;
 LedMgr ledMgr;
+
+MsgBufBig input;
+
+ProgramMgr progMgr(&ledMgr);
 
 SerialMgr serialMgr(&input);
 CobsEncoder cobsEncoder(&serialMgr);
-CmdProcessor cmdProcessor(&serialMgr, &ledMgr, &cobsEncoder);
+CmdProcessor cmdProcessor(&serialMgr, &ledMgr, &progMgr, &cobsEncoder);
 CobsDecoder cobsDecoder(&input, &cmdProcessor);
 
 
-/*
- * n = Turn On
- * o = Turn Off
- * w = Wait
- */
-
 uint8_t state = LOW;
+uint16_t count = 0;
+
    
 void loop() {
-  if (serialMgr.fromSerial() > 0) {
-    cobsDecoder.feed();
-  }
-  delay(100);
-  
-  /*
-  checkForSysCmds();
-  if (gProgramLen < 1) {
-    delay(1000);
-  } else {
-
-    char instruction = 0;
-    char temp[16];
-    
-    for (int i = 0; i < gProgramLen; i += 1) {
-      checkForSysCmds();
-      switch (gProgram[i]) {
-        case 'n':
-        case 'N':
-        case 'o':
-        case 'O':
-        case 'w':
-        case 'W':
-          instruction = gProgram[i];
-          break;
-        default:
-          if (instruction) {
-            execInstruction(instruction, gProgram[i]);
-            instruction = 0;
-          }
-          break;
-      }
+  tBufLen fs = serialMgr.fromSerial();
+  if (fs > 0) {
+    if (cobsDecoder.feed()) {
+      ledMgr.pinTo(fs, HIGH);
     }
   }
-  */
+  uint16_t d = progMgr.advance();
+  if (d > 1) {
+    delay(d);
+  }
     
 }
 
 void setup() {
-
   serialMgr.waitForReady();
-  /*
-  gSerialLen = 0;
-  gMaxProgramLen = min(MAX_PROG_BUF_SIZE, EEPROM.length() - 8);
-  
-  if (!loadProgram()) {
-    setProgramA((uint8_t *)FACTORY_PROGRAM, 0, strlen(FACTORY_PROGRAM), true);
-  }
-  */
 }
 
 
-#ifdef PC_TEST
+#ifdef PC_DEBUG
 int main(int argc, const char *argv[]) {
-  uint8_t data[] = {3, 80, 1, 0, 3, 80, 1, 0};
+  uint8_t data[] = {3, 81, 1};
+  //uint8_t data[] = {03, 11, 22, 02, 33, 00};
   setup();
   Serial.set(data, sizeof(data));
+  uint32_t count = 0;
   while (true) {
+    count += 1;
+    if (count > 9999999) {
+      fprintf(stdout, "%d\n", count);
+      count = 0;
+    }
     loop();
   }
 }
