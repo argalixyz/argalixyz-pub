@@ -7,19 +7,17 @@
 #include <stdint.h>
 #include <stddef.h>
 
+
 typedef int16_t tBufLen;
 typedef uint8_t tBufByte;
 
 #define MAX_PROG_BUF_SIZE 255
 #define MAX_SERIAL_BUF_SIZE (MAX_PROG_BUF_SIZE + 8)
 
-#define FACTORY_PROGRAM \
-  "N0W1N1W1N2W1N3W1N4W1N5W1" \
-  "O0W1O1W1O2W1O3W1O4W1O5W1" \
-  "N0N1N2N3N4N5W1O0O1O2O3O4O5W1" \
-  "N0N1N2N3N4N5W1O0O1O2O3O4O5W1"
-
 #include "debug.h"
+#ifndef PC_DEBUG
+#include <EEPROM.h>
+#endif
 
 template<tBufLen X> class MsgBuf {
 
@@ -250,6 +248,9 @@ class SerialMgr {
     }
 };
 
+
+#define mymin(X, Y) (X < Y) ? (X) : (Y)
+
 class ProgramMgr {
 
   private:
@@ -257,9 +258,61 @@ class ProgramMgr {
     MsgBufBig program;
     tBufLen ip;
     LedMgr *ledMgr;
-
+    
+    const tBufByte writeSig[5] = {'l', '2', 'c', 'b', 0};
+    
     void resetIP(void) {
       this->ip = 0;
+    }
+
+    bool isFlashDataValid() {
+      uint16_t i, maxLen = EEPROM.length();      
+      for (i = 0; writeSig[i] && i < maxLen; i += 1) {
+        if (EEPROM.read(i) != writeSig[i]) {
+#ifdef PC_DEBUG
+          fprintf(stdout, "Flash data is invalid\n");
+#endif
+          return false;
+        }
+      }
+#ifdef PC_DEBUG
+          fprintf(stdout, "Flash data valid %d %d\n", i, maxLen);
+#endif
+      
+      return i < maxLen;
+    }
+
+    void setupFlash() {
+      uint16_t i;
+      uint16_t maxLen = EEPROM.length();
+      for (i = 0; writeSig[i] && i < maxLen; i += 1) {
+        EEPROM.write(i, writeSig[i]);
+      }
+      EEPROM.write(i, 0);
+    }
+
+    
+    void saveProgramToFlash() {
+      tBufLen offset = sizeof(writeSig);
+      tBufLen progLen = this->program.getLen();
+      tBufLen o;
+      for (o = 0; o < progLen; o += 1) {
+        EEPROM.write(o + offset, this->program.getByteAt(o));
+      }
+      EEPROM.write(o + offset, 0);
+    }
+
+    
+    void loadProgramFromFlash() {
+      uint16_t s = sizeof(writeSig);
+      uint16_t e = mymin(s + 255, EEPROM.length());
+      for (uint16_t o = s; o < e; o += 1) {
+        tBufByte data = EEPROM.read(o);
+        if (!data) {
+          break;
+        }
+        this->program.appendByte(data);
+      }
     }
     
   public:
@@ -268,11 +321,17 @@ class ProgramMgr {
       this->ledMgr = pLedMgr;
       this->resetIP();
       this->program.reset();
-    }
 
+      if (isFlashDataValid()) {
+        loadProgramFromFlash();
+      } else {
+        setupFlash();
+      }
+    }
     
     void loadProgramFrom(MsgBufBig *other) {
       this->program.copyFrom(other, 2, other->getLen() - 2);
+      saveProgramToFlash();
       this->resetIP();
     }
 

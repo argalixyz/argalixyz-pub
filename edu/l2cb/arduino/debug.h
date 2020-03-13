@@ -82,7 +82,7 @@ class SerialCls {
     }
     
     void flush() {
-      fprintf(stdout, "[To serial] FLUSH\n");      
+      fprintf(stdout, "[To serial] FLUSH\n");
       fflush(stdout);
     }
 
@@ -96,6 +96,58 @@ class SerialCls {
 };
 
 SerialCls Serial;
+
+const char *EEPROMFile = "eeprom.dat";
+
+class EEPROMCls {
+
+  private:
+
+    FILE *fp;
+    uint8_t buf[512];
+    
+  public:
+
+    uint16_t length() {
+      return sizeof(buf);
+    }
+
+    EEPROMCls() {
+      FILE *fr = fopen(EEPROMFile, "rb");
+      if (NULL != fr) {
+        fread(buf, sizeof(uint8_t), sizeof(buf), fr);
+        fclose(fr);
+      }
+      fp = fopen(EEPROMFile, "wb");
+    }
+    
+    void write(uint16_t offset, uint8_t value) {
+      fprintf(stdout, "[EEPROM] Write offset %d Value %x\n", offset, value);
+      if (offset >= sizeof(buf)) {
+        fprintf(stdout, "Write offset is invalid %d\n", offset);
+        return;
+      }
+      buf[offset] = value;
+      fseek(fp, 0, SEEK_SET); 
+      fwrite(buf, sizeof(uint8_t), sizeof(buf), fp);
+      fflush(fp);
+    }
+
+    ~EEPROMCls() {
+      fclose(fp);
+    }
+
+    uint8_t read(uint16_t offset) {
+      if (offset >= sizeof(buf)) {
+        fprintf(stdout, "Invalid read offset %d\n", offset);
+        return 0;
+      }
+      fprintf(stdout, "[EEPROM] Read %x val %x\n", offset, buf[offset]);
+      return buf[offset];
+    }
+};
+
+EEPROMCls EEPROM;
 
 //g++ -g -Wall -Wpedantic -fstack-protector -fsanitize=address -O0 -DPC_DEBUG -x c++ arduino.ino
 
