@@ -201,6 +201,10 @@ class LedMgr {
       }
     }
 
+    void allOff() {
+      allTo(LOW);
+    }
+
     void pinTo(uint8_t pin, const uint8_t state) {
       uint8_t hwPin = getHwPin(pin);
       digitalWrite(hwPin, state);
@@ -263,6 +267,7 @@ class ProgramMgr {
     
     void resetIP(void) {
       this->ip = 0;
+      ledMgr->allOff();
     }
 
     bool isFlashDataValid() {
@@ -472,14 +477,15 @@ class CmdProcessor : public CobsDecoderCallback {
       }
       
       this->respBuf->reset();
-      tBufByte cmd = pData->getByteAt(0);
+      this->respBuf->appendByte(pData->getByteAt(0)); /* Req <-> Resp match */      
+      tBufByte cmd = pData->getByteAt(1);
+      
       switch (cmd) {
         case tCmds::Query:
 #ifdef PC_DEBUG
           fprintf(stdout, "Query\n");
 #endif          
-          this->respBuf->appendByte(tCmds::Query);
-          this->respBuf->appendByte(pData->getByteAt(1)); /* Req <-> Resp match */
+          this->respBuf->appendByte(tCmds::Query);          
           this->respBuf->appendByte(PROTOCOL_VERSION);
           this->respBuf->appendByte(this->ledMgr->getNumLights());
           this->encoder->send();
@@ -488,7 +494,6 @@ class CmdProcessor : public CobsDecoderCallback {
         case tCmds::Program:
           this->progMgr->loadProgramFrom(pData);
           this->respBuf->appendByte(tCmds::Program);
-          this->respBuf->appendByte(pData->getByteAt(1));
           this->encoder->send();
           break;
       }
@@ -518,10 +523,10 @@ void loop() {
     cobsDecoder.feed();
   }
   uint16_t d = progMgr.advance();
-  if (d < 10) {
-    d = 10;
+  if (d > 1) {
+    delay(d);
   }
-  delay(d);
+  
 }
 
 void setup() {
