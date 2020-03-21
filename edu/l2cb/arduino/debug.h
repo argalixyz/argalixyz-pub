@@ -8,7 +8,12 @@
 
 #include <stdio.h>
 #include <string.h>
+#ifdef _WIN32
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
+
 
 #define OUTPUT (0)
 #define INPUT  (1)
@@ -46,7 +51,11 @@ void digitalWrite(uint8_t pin, uint8_t state) {
 
 void delay(uint32_t d) {
   fprintf(stdout, "Delay %d\n", d);
+#ifdef _WIN32
+  Sleep(d);
+#else
   usleep(d * 1000);
+#endif
 }
 
 class SerialCls {

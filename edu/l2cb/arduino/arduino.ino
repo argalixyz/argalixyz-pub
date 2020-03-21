@@ -32,6 +32,25 @@ template<tBufLen X> class MsgBuf {
       reset();
     }
 
+    bool isFull() {
+      return !this->hasSpace();
+    }
+    
+    tBufLen firstIndexOf(tBufByte c, tBufLen startOffset, tBufLen endOffset) {
+      if (startOffset < 0 || startOffset >= this->len) {
+        startOffset = 0;
+      }
+      if (endOffset < 0 || endOffset >= this->len) {
+        endOffset = this->len;
+      }
+      for (tBufLen i = startOffset; i < endOffset; i += 1) {
+        if (c == this->buf[i]) {
+          return i;
+        }
+      }
+      return -1;
+    }
+
     void reset() {
       this->len = 0;
     }
@@ -92,7 +111,7 @@ class CobsDecoderCallback {
 
   public:
 
-    virtual void onPacket(MsgBufBig *pData) = 0;
+    virtual bool onPacket(MsgBufBig *pData) = 0;
     
 };
 
@@ -123,7 +142,9 @@ class CobsDecoder {
       tBufByte code = 0xFF, copy = 0;
       tBufLen end = start + len;
       
-      *zeroAt = -1;
+      if (NULL != zeroAt) {
+        *zeroAt = -1;
+      }
       
       for (tBufLen curr = start; curr < end; copy--) {
         if (copy != 0) {
@@ -134,7 +155,9 @@ class CobsDecoder {
           }
           copy = code = this->input->getByteAt(curr++);
           if (code == 0) {
-            *zeroAt = curr;
+            if (NULL != zeroAt) {
+              *zeroAt = curr;
+            }
             break; /* Source length too long */
           }
         }
@@ -144,31 +167,23 @@ class CobsDecoder {
     
 
     bool feed() {
-      tBufLen zeroAt;
-
-      output.reset();
-     
-      tBufLen len = this->UnStuffData(0, this->input->getLen(), &zeroAt);
-      if (-1 != zeroAt || len < MAX_UINT8_BUF_SIZE) {
-        /*
-         * Feed this packet.
-         */
-        callback->onPacket(&output);
-        
-        if (-1 != zeroAt) {
-          this->input->splice(0, zeroAt, -1);
-        } else {
+      tBufLen zeroAt = this->input->firstIndexOf(0, -1, -1);
+      if (zeroAt < 0) {
+        if (this->input->isFull()) {
           this->input->reset();
         }
-        return true;
+        return false;
       }
-      if (len >= MAX_UINT8_BUF_SIZE) {
-        /*
-         * Too big of a packet. Discard.
-         */
-        this->input->reset();
+      output.reset();
+      tBufLen len = this->UnStuffData(0, zeroAt, NULL);
+      /*
+       * Feed this packet.
+       */
+      callback->onPacket(&output);
+      if (-1 != zeroAt) {
+        this->input->splice(0, 1 + zeroAt, -1);
       }
-      return false;
+      return true;
     }
 
 };
@@ -417,6 +432,7 @@ class CobsEncoder {
         StartBlock(&code_ptr, &code);
       }
       FinishBlock(code_ptr, code);
+      this->tempBuf.appendByte(0);
     }
 
   public:
@@ -463,7 +479,7 @@ class CmdProcessor : public CobsDecoderCallback {
       this->respBuf = this->encoder->getRespBuf();
     }
 
-    virtual void onPacket(MsgBufBig *pData) override {
+    virtual bool onPacket(MsgBufBig *pData) override {
       tBufLen len = pData->getLen();
 #ifdef PC_DEBUG
       fprintf(stdout, "Buf len %d\n", len);
@@ -472,10 +488,10 @@ class CmdProcessor : public CobsDecoderCallback {
       }
 #endif          
       
-      if (len < 1) {
-        return;
+      if (len < 2) {
+        return false;
       }
-      
+      //this->ledMgr->allTo(HIGH);
       this->respBuf->reset();
       this->respBuf->appendByte(pData->getByteAt(0)); /* Req <-> Resp match */      
       tBufByte cmd = pData->getByteAt(1);
@@ -485,6 +501,7 @@ class CmdProcessor : public CobsDecoderCallback {
 #ifdef PC_DEBUG
           fprintf(stdout, "Query\n");
 #endif          
+          
           this->respBuf->appendByte(tCmds::Query);          
           this->respBuf->appendByte(PROTOCOL_VERSION);
           this->respBuf->appendByte(this->ledMgr->getNumLights());
@@ -497,6 +514,7 @@ class CmdProcessor : public CobsDecoderCallback {
           this->encoder->send();
           break;
       }
+      return true;
     }
 
 };
@@ -537,7 +555,7 @@ void setup() {
 #ifdef PC_DEBUG
 int main(int argc, const char *argv[]) {
   //uint8_t data[] = {3, 81, 1};
-  uint8_t data[] = {11, 80, 1, 78, 48, 87, 49, 79, 48, 87, 49};
+  uint8_t data[] = {11, 80, 1, 78, 48, 87, 49, 79, 48, 87, 49, 0};
   //uint8_t data[] = {03, 11, 22, 02, 33, 00};
   setup();
   Serial.set(data, sizeof(data));
